@@ -1,7 +1,7 @@
 anthropic==0.40.0
 langgraph==0.2.53
 langsmith==0.1.147
-tiktoken==0.8.0
+tiktoken>=0.8.0
 streamlit==1.41.1
 python-dotenv==1.0.1
 pytest==8.3.4
