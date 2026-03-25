@@ -39,6 +39,7 @@ import json
 import time
 from pathlib import Path
 from src.config import OFFLOAD_DB_PATH
+from src.context import vector_store
 
 
 # Database Setup
@@ -181,6 +182,9 @@ def offload_message(
         ))
         conn.commit()
 
+    # Add to semantic search index (alongside SQLite for retrieval ranking)
+    vector_store.add_to_index(message_id, session_id, content)
+
 
 def retrieve_relevant(
     session_id: str,
@@ -189,20 +193,57 @@ def retrieve_relevant(
     max_tokens: int = 2000,
 ) -> list[dict]:
     """
-    Find offloaded messages relevant to a query.
+    Find offloaded messages relevant to a query using semantic vector search.
 
-    Scoring: keyword overlap between query and stored keywords.
-    The more keywords in common, the higher the relevance score.
+    PRIMARY: Vector similarity search via ChromaDB — finds semantically
+    related messages even when they share no keywords with the query.
+    For example, "What did I say about Python?" will match a message
+    about "programming" or "coding" because the concepts are close in
+    embedding space.
+
+    FALLBACK: Keyword overlap scoring if vector search returns nothing
+    (e.g. first session before ChromaDB index is warm, or on import error).
+
+    SQLite remains the source of truth — ChromaDB only provides the ranked
+    message IDs; actual content is always fetched from SQLite.
 
     Args:
         session_id:  Only retrieve from this session's messages.
-        query:       The user's current message (used to extract keywords).
+        query:       The user's current message (used as the search vector).
         max_results: Cap on number of messages returned.
         max_tokens:  Token budget for the retrieved set.
 
     Returns:
         List of message dicts, most relevant first.
     """
+    # ── Primary: semantic search ────────────────────────────────────────────
+    semantic_ids = vector_store.semantic_search(session_id, query, n_results=max_results)
+
+    if semantic_ids:
+        placeholders = ",".join("?" * len(semantic_ids))
+        with _get_conn() as conn:
+            rows = conn.execute(f"""
+                SELECT message_id, role, content, layer, token_count, keywords, timestamp
+                FROM offloaded_messages
+                WHERE session_id = ? AND message_id IN ({placeholders})
+            """, [session_id] + semantic_ids).fetchall()
+
+        if rows:
+            # Preserve semantic ranking order returned by ChromaDB
+            id_rank = {mid: i for i, mid in enumerate(semantic_ids)}
+            ordered = sorted(
+                [dict(r) for r in rows],
+                key=lambda r: id_rank.get(r["message_id"], 999),
+            )
+            results, used = [], 0
+            for msg in ordered:
+                if used + msg["token_count"] > max_tokens:
+                    break
+                results.append(msg)
+                used += msg["token_count"]
+            return results
+
+    # ── Fallback: keyword overlap ───────────────────────────────────────────
     query_keywords = set(_extract_keywords(query))
     if not query_keywords:
         return []
@@ -218,7 +259,6 @@ def retrieve_relevant(
     if not rows:
         return []
 
-    # Score each stored message by keyword overlap with the query
     scored = []
     for row in rows:
         stored_keywords = set(json.loads(row["keywords"]))
@@ -229,12 +269,8 @@ def retrieve_relevant(
     if not scored:
         return []
 
-    # Sort by score descending
     scored.sort(key=lambda x: x[0], reverse=True)
-
-    # Return top results within token budget
-    results = []
-    used_tokens = 0
+    results, used_tokens = [], 0
     for _, msg in scored[:max_results]:
         if used_tokens + msg["token_count"] > max_tokens:
             break
@@ -273,6 +309,7 @@ def clear_session(session_id: str) -> None:
             (session_id,)
         )
         conn.commit()
+    vector_store.clear_session_index(session_id)
 
 
 # Cross-Session Persistence

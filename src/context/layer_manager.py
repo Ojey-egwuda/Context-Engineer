@@ -34,6 +34,17 @@ heuristics are transparent and debuggable.
 """
 
 from enum import Enum
+import anthropic as _anthropic
+from src.config import ANTHROPIC_API_KEY, HAIKU_MODEL_NAME, USE_LLM_CLASSIFICATION
+
+_haiku_client: "_anthropic.Anthropic | None" = None
+
+
+def _get_haiku():
+    global _haiku_client
+    if _haiku_client is None and ANTHROPIC_API_KEY:
+        _haiku_client = _anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    return _haiku_client
 
 
 class ContextLayer(str, Enum):
@@ -56,8 +67,8 @@ _CRITICAL_SIGNALS = [
     "please remember", "don't forget", "remember this",
     "my name is", "i am called", "you must always",
     "key constraint", "hard rule:", "never forget",
-    "please keep in mind", "important constraint", 
-    "remember this instead",
+    "please keep in mind", "important constraint",
+    "remember this instead", "is important:",
 ]
 
 # These phrases suggest the message is peripheral / background
@@ -107,6 +118,50 @@ def classify_layer(content: str, role: str) -> ContextLayer:
 
     # Rule 5: Default — working layer (relevant to current task)
     return ContextLayer.WORKING
+
+
+def classify_layer_llm(content: str, role: str) -> "ContextLayer":
+    """
+    Classify message importance using Claude Haiku.
+
+    More accurate than heuristics — understands implication and nuance
+    that keyword matching misses. For example:
+      "I go by Alex" → CRITICAL (identity, not caught by exact keyword)
+      "Interesting, go on" → BACKGROUND (filler, heuristic might miss it)
+
+    Falls back to heuristic classify_layer() on any failure.
+    Cost: ~$0.00008 per message — negligible at Haiku pricing.
+    """
+    if role == "system":
+        return ContextLayer.CRITICAL
+
+    client = _get_haiku()
+    if client is None:
+        return classify_layer(content, role)
+
+    try:
+        response = client.messages.create(
+            model=HAIKU_MODEL_NAME,
+            max_tokens=5,
+            system=(
+                "Classify the importance of this message for an AI assistant's memory. "
+                "Reply with exactly one word:\n"
+                "CRITICAL — identity facts, explicit constraints, 'remember this', "
+                "permanent user preferences\n"
+                "WORKING — questions, answers, ongoing discussion relevant to the task\n"
+                "BACKGROUND — filler, small talk, peripheral remarks, easily forgettable\n"
+                "Reply with only: CRITICAL, WORKING, or BACKGROUND"
+            ),
+            messages=[{"role": "user", "content": content[:600]}],
+        )
+        label = response.content[0].text.strip().upper()
+        if "CRITICAL" in label:
+            return ContextLayer.CRITICAL
+        elif "BACKGROUND" in label:
+            return ContextLayer.BACKGROUND
+        return ContextLayer.WORKING
+    except Exception:
+        return classify_layer(content, role)
 
 
 def get_offload_candidates(

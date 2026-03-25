@@ -28,7 +28,7 @@ offloading quickly and demonstrate the system working live.
 """
 
 import streamlit as st
-from src.agents.main_agent import create_session, chat, get_context_health, reset_session
+from src.agents.main_agent import create_session, get_context_health, reset_session
 from src.context.offload_store import get_user_session_count, get_user_last_active
 from src.config import TOKEN_BUDGET, PRE_ROT_THRESHOLD
 import time as _time
@@ -184,6 +184,22 @@ with st.sidebar:
             last_str = datetime.datetime.fromtimestamp(last).strftime("%d %b %Y %H:%M") if last else "—"
             st.caption(f"**User:** `{uid}` | **Sessions stored:** {cnt} | **Last active:** {last_str}")
 
+    # Memory Profile — shows what is stored for this user
+    if st.session_state.user_id and st.session_state.agent_state:
+        with st.expander("🧠 Memory Profile", expanded=False):
+            from src.context.offload_store import load_critical_memory
+            uid      = st.session_state.user_id
+            memories = load_critical_memory(uid)
+            cnt      = get_user_session_count(uid)
+            st.caption(f"**{len(memories)}** critical memories · **{cnt}** session(s)")
+            if memories:
+                for mem in memories:
+                    icon = "👤" if mem["role"] == "user" else "🤖"
+                    snippet = mem["content"][:120] + ("..." if len(mem["content"]) > 120 else "")
+                    st.markdown(f"{icon} `{snippet}`")
+            else:
+                st.caption("No memories yet. Say *'My name is Alex'* to store one.")
+
     st.divider()
 
     # Technique Explainer
@@ -300,7 +316,7 @@ if st.session_state.agent_state is None:
     st.stop()
 health = get_context_health(st.session_state.agent_state)
 
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 
 with col1:
     st.metric(
@@ -330,6 +346,16 @@ with col4:
         label="Active Messages",
         value=health["active_messages"],
         delta=f"mode: {health['agent_mode']}",
+    )
+
+with col5:
+    cost = health.get("total_cost_usd", 0.0)
+    in_tok  = health.get("session_input_tokens", 0)
+    out_tok = health.get("session_output_tokens", 0)
+    st.metric(
+        label="Session Cost",
+        value=f"${cost:.4f}",
+        delta=f"{in_tok:,} in / {out_tok:,} out",
     )
 
 # Token Progress Bar
@@ -423,24 +449,24 @@ if user_input := st.chat_input("Send a message..."):
     with st.chat_message("user"):
         st.write(user_input)
 
-    # Run through the agent
-    with st.spinner("Thinking..."):
-        new_state, response = chat(st.session_state.agent_state, user_input)
-        st.session_state.agent_state = new_state
-
-        # Get layer of the last user message for display
-        messages = new_state.get("messages", [])
-        user_layer = next(
-            (m.get("layer") for m in reversed(messages) if m["role"] == "user"),
-            "working"
-        )
-
-    # Show assistant response
+    # Stream the assistant response token by token
+    result_holder = []
     with st.chat_message("assistant"):
-        st.write(response)
-        retrieved = new_state.get("retrieved_context", "")
-        if retrieved:
+        from src.agents.main_agent import stream_chat
+        response = st.write_stream(
+            stream_chat(st.session_state.agent_state, user_input, result_holder)
+        )
+        new_state = result_holder[0] if result_holder else st.session_state.agent_state
+        st.session_state.agent_state = new_state
+        if new_state.get("retrieved_context"):
             st.caption("📂 Drew from retrieved long-term memory")
+
+    # Get layer of the last user message for display
+    messages   = new_state.get("messages", [])
+    user_layer = next(
+        (m.get("layer") for m in reversed(messages) if m["role"] == "user"),
+        "working"
+    )
 
     # Store in display history
     st.session_state.chat_history.append(("user",      user_input, user_layer))

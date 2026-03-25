@@ -116,3 +116,15 @@ class AgentState(TypedDict):
     # The assistant's response text.
     # Written by reason_node, added to messages by respond_node.
     # Also displayed directly by the Streamlit app.
+
+    # Cost tracking
+    session_input_tokens: int
+    # Cumulative input tokens sent to Claude (Sonnet) this session.
+    # Incremented by reason_node after every API call (including tool loops).
+
+    session_output_tokens: int
+    # Cumulative output tokens received from Claude (Sonnet) this session.
+
+    total_cost_usd: float
+    # Running session cost in USD, calculated from token usage and model pricing.
+    # Displayed on the dashboard so users can see the economics of context management.

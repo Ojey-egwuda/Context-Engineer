@@ -103,3 +103,40 @@ def build_graph():
 
 # Build once at module level — reused across all sessions
 agent_graph = build_graph()
+
+
+def build_async_graph():
+    """
+    Async variant using async_reason_node.
+
+    Use for production deployments where multiple users are served
+    concurrently (FastAPI, aiohttp). The awaitable Claude API call
+    lets other requests proceed while waiting for the LLM response.
+
+    Usage:
+        result = await async_agent_graph.ainvoke(state)
+    """
+    from src.graph.nodes import async_reason_node
+
+    graph = StateGraph(AgentState)
+    graph.add_node("classify_input",   classify_input_node)
+    graph.add_node("monitor_tokens",   monitor_tokens_node)
+    graph.add_node("offload_context",  offload_context_node)
+    graph.add_node("retrieve_context", retrieve_context_node)
+    graph.add_node("reason",           async_reason_node)
+    graph.add_node("respond",          respond_node)
+
+    graph.add_edge(START,            "classify_input")
+    graph.add_edge("classify_input", "monitor_tokens")
+    graph.add_conditional_edges(
+        "monitor_tokens", should_offload,
+        {"offload_context": "offload_context", "retrieve_context": "retrieve_context"},
+    )
+    graph.add_edge("offload_context",  "retrieve_context")
+    graph.add_edge("retrieve_context", "reason")
+    graph.add_edge("reason",           "respond")
+    graph.add_edge("respond",          END)
+    return graph.compile()
+
+
+async_agent_graph = build_async_graph()
